@@ -1,10 +1,26 @@
-// Fix: Removed invalid file markers that were causing parsing errors.
+// NOVO: Aviso para o TypeScript sobre a variável global do Firebase
+declare const firebase: any;
+
 // --- Type Definitions for external libraries ---
 declare const XLSX: any;
 declare const Chart: any;
 declare const ChartDataLabels: any;
 declare const jspdf: any;
 declare const html2canvas: any;
+
+// NOVO: Bloco de configuração e inicialização do Firebase
+const firebaseConfig = {
+  apiKey: import.meta.env.VITE_FIREBASE_API_KEY,
+  authDomain: import.meta.env.VITE_FIREBASE_AUTH_DOMAIN,
+  projectId: import.meta.env.VITE_FIREBASE_PROJECT_ID,
+  storageBucket: import.meta.env.VITE_FIREBASE_STORAGE_BUCKET,
+  messagingSenderId: import.meta.env.VITE_FIREBASE_MESSAGING_SENDER_ID,
+  appId: import.meta.env.VITE_FIREBASE_APP_ID
+};
+
+firebase.initializeApp(firebaseConfig);
+const db = firebase.firestore();
+
 
 // --- DOM Elements ---
 const fileUpload = document.getElementById('file-upload') as HTMLInputElement;
@@ -84,6 +100,7 @@ const TODAY = new Date(); // Use current date
 let currentSortKey: string = 'Dias Restantes';
 let currentSortOrder: 'asc' | 'desc' = 'asc';
 let activeModalItem: any = null;
+let isUpdatingFromFirebase = false; // NOVO: Flag para evitar loops
 
 // Column definitions for each view
 const viewColumns = {
@@ -148,6 +165,70 @@ function initializeApp() {
             closeModal();
         }
     });
+
+    // NOVO: Inicia a escuta por dados do Firebase
+    escutarMudancasEmTempoReal();
+}
+
+// NOVO: --- Firebase Integration ---
+async function salvarDados(dataToSave: any[]) {
+    if (isUpdatingFromFirebase) return; // Evita salvar dados que acabaram de chegar do Firebase
+    console.log("Enviando dados para o Firebase...");
+    try {
+        await db.collection("dashboardImportacao").doc("dadosAtuais").set({
+            dados: dataToSave,
+            ultimaAtualizacao: new Date()
+        });
+        showToast("Planilha enviada com sucesso! Atualizando para todos...", "success");
+    } catch (error) {
+        console.error("Erro ao salvar dados no Firebase: ", error);
+        showToast("Falha ao sincronizar com o servidor.", "error");
+    }
+}
+
+function escutarMudancasEmTempoReal() {
+    console.log("Iniciando ouvinte de dados do Firebase...");
+    db.collection("dashboardImportacao").doc("dadosAtuais").onSnapshot(doc => {
+        isUpdatingFromFirebase = true;
+        console.log("Dados recebidos do Firebase!");
+
+        if (doc.exists) {
+            const data = doc.data();
+            if (data && data.dados) {
+                originalData = data.dados; // ATUALIZA A VARIÁVEL GLOBAL
+                const ultimaAtualizacao = data.ultimaAtualizacao?.toDate();
+
+                // Popula os filtros e renderiza o dashboard com os novos dados
+                populateStatusFilter(originalData);
+                populateShipmentTypeFilter(originalData);
+                populateCargoTypeFilter(originalData);
+                populatePoFilter(originalData);
+                populateVesselFilter(originalData);
+                applyFiltersAndRender();
+                
+                // Mostra os containers do dashboard
+                filterContainer.classList.remove('hidden');
+                chartsContainer.classList.remove('hidden');
+                viewTabsContainer.classList.remove('hidden');
+                exportCsvBtn.classList.remove('hidden');
+                exportPdfBtn.classList.remove('hidden');
+                exportExcelBtn.classList.remove('hidden');
+                totalFclDisplay.classList.remove('hidden');
+
+                if (ultimaAtualizacao) {
+                    lastUpdate.textContent = `Dados sincronizados | Atualizado em: ${ultimaAtualizacao.toLocaleString('pt-BR')}`;
+                }
+                showToast('Dados atualizados em tempo real!', 'success');
+            }
+        } else {
+            console.log("Nenhum dado no Firebase. Aguardando upload.");
+            resetUI(); // Garante que a interface esteja limpa
+        }
+        setTimeout(() => { isUpdatingFromFirebase = false; }, 500);
+    }, error => {
+        console.error("Erro no ouvinte do Firebase: ", error);
+        showToast("Conexão com o servidor perdida.", "error");
+    });
 }
 
 // --- Theme Management ---
@@ -202,7 +283,8 @@ function showToast(message: string, type: 'success' | 'error' | 'warning' = 'suc
 }
 
 // --- File Handling ---
-function handleFileUpload(event: Event) {
+// MODIFICADO: A função agora é 'async' para esperar o salvamento no Firebase
+async function handleFileUpload(event: Event) {
     const target = event.target as HTMLInputElement;
     const file = target.files?.[0];
     const uploadLabel = document.querySelector('label[for="file-upload"]');
@@ -212,33 +294,20 @@ function handleFileUpload(event: Event) {
     uploadLabel.innerHTML = `<i class="fas fa-spinner fa-spin mr-2"></i> Processando...`;
 
     const reader = new FileReader();
-    reader.onload = (e) => {
+    reader.onload = async (e) => {
         try {
             const workbook = XLSX.read(new Uint8Array(e.target!.result as ArrayBuffer), { type: 'array' });
             const sheetName = "FUP - International Trade - D11";
             if (!workbook.Sheets[sheetName]) throw new Error(`Planilha "${sheetName}" não encontrada.`);
             
-            originalData = XLSX.utils.sheet_to_json(workbook.Sheets[sheetName], { raw: false, defval: '' });
+            const dataFromSheet = XLSX.utils.sheet_to_json(workbook.Sheets[sheetName], { raw: false, defval: '' });
             
-            if (originalData.length === 0) throw new Error("A planilha está vazia.");
+            if (dataFromSheet.length === 0) throw new Error("A planilha está vazia.");
 
-            populateStatusFilter(originalData);
-            populateShipmentTypeFilter(originalData);
-            populateCargoTypeFilter(originalData);
-            populatePoFilter(originalData);
-            populateVesselFilter(originalData);
-            applyFiltersAndRender();
+            // MODIFICADO: Em vez de processar localmente, apenas salva no Firebase.
+            // O ouvinte 'escutarMudancasEmTempoReal' vai cuidar de atualizar a tela para todos.
+            await salvarDados(dataFromSheet);
             
-            filterContainer.classList.remove('hidden');
-            chartsContainer.classList.remove('hidden');
-            viewTabsContainer.classList.remove('hidden');
-            exportCsvBtn.classList.remove('hidden');
-            exportPdfBtn.classList.remove('hidden');
-            exportExcelBtn.classList.remove('hidden');
-            totalFclDisplay.classList.remove('hidden');
-
-            lastUpdate.textContent = `Dados de "${sheetName}" | Atualizado em: ${new Date().toLocaleString('pt-BR')}`;
-            showToast('Dashboard carregado com sucesso!', 'success');
         } catch (err: any) {
             showToast(err.message || 'Erro ao processar arquivo.', 'error');
             resetUI();
@@ -597,8 +666,8 @@ function renderCharts(processedData: any[], filteredData: any[]) {
 
     const getStatusColor = (status: string) => {
         const s = status.toLowerCase();
-        if (s.includes('delivered')) return 'rgba(34, 197, 94, 0.7)';      // green
-        if (s.includes('cleared')) return 'rgba(59, 130, 246, 0.7)';       // blue
+        if (s.includes('delivered')) return 'rgba(34, 197, 94, 0.7)';     // green
+        if (s.includes('cleared')) return 'rgba(59, 130, 246, 0.7)';      // blue
         if (s.includes('sem status')) return 'rgba(239, 68, 68, 0.7)';     // red
         if (s.includes('presence') || s.includes('unloaded')) return 'rgba(249, 115, 22, 0.7)'; // orange
         if (s.includes('on board') || s.includes('transshipment')) return 'rgba(168, 85, 247, 0.7)'; // purple
@@ -716,15 +785,15 @@ function renderCharts(processedData: any[], filteredData: any[]) {
             plugins: { 
                 legend: { position: 'right' },
                 tooltip: {
-                     callbacks: {
-                        label: function(context) {
-                            const label = context.label || '';
-                            const value = Number(context.parsed as any) || 0;
-                            const total = totalContainersInView as number;
-                            const percentage = total > 0 ? ((value / total) * 100).toFixed(1) : '0.0';
-                            return `${label}: ${value} Containers (${percentage}%)`;
-                        }
-                    }
+                       callbacks: {
+                            label: function(context) {
+                                const label = context.label || '';
+                                const value = Number(context.parsed as any) || 0;
+                                const total = totalContainersInView as number;
+                                const percentage = total > 0 ? ((value / total) * 100).toFixed(1) : '0.0';
+                                return `${label}: ${value} Containers (${percentage}%)`;
+                            }
+                       }
                 }
             },
             onClick: (event, elements, chart) => {
